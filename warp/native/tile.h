@@ -5861,6 +5861,9 @@ inline CUDA_CALLABLE void tile_element_assign(TileA& dest, const Scalar& src, In
     constexpr int NumIndices = sizeof...(Indices);
     auto coord = tile_coord_prefix<Rank>(indices...);
 
+    // threads may still be reading dest from an earlier statement; wait for them before overwriting it
+    WP_TILE_SYNC();
+
     if constexpr (NumIndices == Rank) {
         dest.data(coord) = src;
     } else if constexpr (is_vector<typename TileA::Type>::value && NumIndices == Rank + 1) {

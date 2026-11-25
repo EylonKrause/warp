@@ -90,6 +90,53 @@ def test_tile_assign(kernel, ndim):
     return test_run
 
 
+@wp.func
+def _busy(n: float) -> float:
+    # loops n times and returns 0
+    s = float(0.0)
+    for _ in range(int(n)):
+        s = s * 0.5 + 1.0
+    return wp.where(s > 1.0e30, 1.0, 0.0)
+
+
+@wp.kernel
+def tile_assign_after_read_kernel(y_in: wp.array2d[float], work: wp.array2d[float], output: wp.array3d[float]):
+    i = wp.tid()
+    y = wp.tile_load(y_in, shape=(32, 32), storage="shared")
+    w = wp.tile_load(work, shape=(32, 32))
+    acc = wp.tile_zeros(shape=(32, 32), dtype=float)
+    for it in range(4):
+        # adds 0 but makes the odd rows finish their reads of y late
+        acc += wp.tile_map(_busy, w)
+        acc += y
+        y[1, 0] = float(it + 100)
+    wp.tile_store(output[i], acc)
+
+
+def test_tile_assign_after_read(test, device):
+    """Element assignment must not overwrite a shared tile while other threads still read it (GH-2306)."""
+    num_blocks = 256 if device.is_cuda else 2
+
+    rng = np.random.default_rng(0)
+    y_np = rng.integers(0, 8, size=(32, 32)).astype(np.float32)
+    work_np = np.zeros((32, 32), dtype=np.float32)
+    work_np[1::2] = 2000.0
+
+    output = wp.zeros((num_blocks, 32, 32), dtype=float, device=device)
+    wp.launch_tiled(
+        tile_assign_after_read_kernel,
+        dim=num_blocks,
+        inputs=[wp.array(y_np, device=device), wp.array(work_np, device=device)],
+        outputs=[output],
+        block_dim=64,
+        device=device,
+    )
+
+    expected = 4.0 * y_np
+    expected[1, 0] = y_np[1, 0] + 100.0 + 101.0 + 102.0
+    assert_np_equal(output.numpy(), np.broadcast_to(expected, output.shape))
+
+
 devices = get_test_devices()
 
 
@@ -127,6 +174,19 @@ add_function_test(
     "test_tile_assign_4d",
     test_tile_assign(tile_assign_4d_kernel, 4),
     devices=devices,
+)
+add_function_test(
+    TestTileLoadAssign,
+    "test_tile_assign_after_read",
+    test_tile_assign_after_read,
+    devices=devices,
+)
+add_function_test(
+    TestTileLoadAssign,
+    "test_tile_assign_after_read_cpu_blocks",
+    test_tile_assign_after_read,
+    devices=get_cpu_test_devices(),
+    enable_cpu_blocks=True,
 )
 
 

@@ -194,13 +194,16 @@ CUDA_CALLABLE TileZ& tile_lower_solve(Fwd fun_forward, Bkwd fun_bkwd, TileL& L, 
 template <typename Fwd, typename TileL, typename TileY>
 CUDA_CALLABLE void tile_lower_solve_inplace(Fwd fun_forward, TileL& L, TileY& y)
 {
+    // threads may still be reading the right-hand side from an earlier statement (e.g. y[i, j]
+    // or tile_astype(y)); wait for them before overwriting it in place
+    WP_TILE_SYNC();
+
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_cholesky_forward_substitution<false>(L, y, y);
 #else
     if constexpr (wp_is_null_func<Fwd>::value) {
         partitioned_gemm::scalar_cholesky_forward_substitution<false>(L, y, y);
     } else {
-        WP_TILE_SYNC();
         fun_forward(L.data.ptr, y.data.ptr);
         WP_TILE_SYNC();
     }
@@ -357,6 +360,10 @@ CUDA_CALLABLE TileX& tile_upper_solve(Fwd fun_forward, TileU& U, TileZ& z, TileX
 template <typename Fwd, typename TileU, typename TileZ>
 CUDA_CALLABLE void tile_upper_solve_inplace(Fwd fun_forward, TileU& U, TileZ& z)
 {
+    // threads may still be reading the right-hand side from an earlier statement (e.g. y[i, j]
+    // or tile_astype(y)); wait for them before overwriting it in place
+    WP_TILE_SYNC();
+
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
     {
         auto L = tile_transpose(U);
@@ -367,7 +374,6 @@ CUDA_CALLABLE void tile_upper_solve_inplace(Fwd fun_forward, TileU& U, TileZ& z)
         auto L = tile_transpose(U);
         partitioned_gemm::scalar_cholesky_back_substitution<false>(L, z);
     } else {
-        WP_TILE_SYNC();
         fun_forward(U.data.ptr, z.data.ptr);
         WP_TILE_SYNC();
     }
@@ -435,13 +441,16 @@ CUDA_CALLABLE TileX& tile_cholesky_solve(Fwd fun_forward, TileA& A, TileY& Y, Ti
 template <bool Upper, typename Fwd, typename TileA, typename TileY>
 CUDA_CALLABLE void tile_cholesky_solve_inplace(Fwd fun_forward, TileA& A, TileY& Y)
 {
+    // threads may still be reading the right-hand side from an earlier statement (e.g. y[i, j]
+    // or tile_astype(y)); wait for them before overwriting it in place
+    WP_TILE_SYNC();
+
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_cholesky_solve<Upper>(A, Y, Y);
 #else
     if constexpr (wp_is_null_func<Fwd>::value) {
         partitioned_gemm::scalar_cholesky_solve<Upper>(A, Y, Y);
     } else {
-        WP_TILE_SYNC();
         fun_forward(A.data.ptr, Y.data.ptr);
         WP_TILE_SYNC();
     }

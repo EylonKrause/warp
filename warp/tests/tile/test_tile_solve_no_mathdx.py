@@ -598,6 +598,77 @@ def test_cholesky_solve_matrix_block_dim_1(test, device):
 # -----------------------------------------------------------------------------
 
 
+# -----------------------------------------------------------------------------
+# in-place solves right after the right-hand side is read (GH-2306)
+# -----------------------------------------------------------------------------
+
+RACE_TILE = 32
+RACE_ITERS = 4
+
+
+@wp.func
+def _race_busy(n: float) -> float:
+    # loops n times and returns 0
+    s = float(0.0)
+    for _ in range(int(n)):
+        s = s * 0.5 + 1.0
+    return wp.where(s > 1.0e30, 1.0, 0.0)
+
+
+def _make_solve_inplace_after_read_kernel(solve: str):
+    @wp.kernel(enable_backward=False, module="unique", module_options={"enable_mathdx_solver": False})
+    def kernel(gA: wp.array2d[float], gY: wp.array2d[float], work: wp.array2d[float], out: wp.array3d[float]):
+        i = wp.tid()
+        A = wp.tile_load(gA, shape=(RACE_TILE, RACE_TILE), storage="shared")
+        y = wp.tile_load(gY, shape=(RACE_TILE, RACE_TILE), storage="shared")
+        w = wp.tile_load(work, shape=(RACE_TILE, RACE_TILE))
+        acc = wp.tile_zeros(shape=(RACE_TILE, RACE_TILE), dtype=float)
+        for _ in range(RACE_ITERS):
+            # adds 0 but makes the odd rows finish their reads of y late
+            acc += wp.tile_map(_race_busy, w)
+            acc += y
+            if wp.static(solve == "lower"):
+                wp.tile_lower_solve_inplace(A, y)
+            elif wp.static(solve == "upper"):
+                wp.tile_upper_solve_inplace(A, y)
+            else:
+                wp.tile_cholesky_solve_inplace(A, y)
+        wp.tile_store(out[i], acc)
+
+    return kernel
+
+
+tile_lower_solve_inplace_after_read_kernel = _make_solve_inplace_after_read_kernel("lower")
+tile_upper_solve_inplace_after_read_kernel = _make_solve_inplace_after_read_kernel("upper")
+tile_cholesky_solve_inplace_after_read_kernel = _make_solve_inplace_after_read_kernel("cholesky")
+
+
+def test_solve_inplace_after_read(test, device):
+    """In-place solves must not overwrite the right-hand side while other threads still read it."""
+    num_blocks = 256 if device.is_cuda else 2
+
+    rng = np.random.default_rng(0)
+    y_np = rng.integers(0, 8, size=(RACE_TILE, RACE_TILE)).astype(np.float32)
+    work_np = np.zeros((RACE_TILE, RACE_TILE), dtype=np.float32)
+    work_np[1::2] = 2000.0
+
+    # A = 2 I: every solve halves y (a quarter for Cholesky), so all sums are exact in float32
+    A = wp.array(2.0 * np.eye(RACE_TILE, dtype=np.float32), device=device)
+    y = wp.array(y_np, device=device)
+    work = wp.array(work_np, device=device)
+
+    for kernel, factor in (
+        (tile_lower_solve_inplace_after_read_kernel, 0.5),
+        (tile_upper_solve_inplace_after_read_kernel, 0.5),
+        (tile_cholesky_solve_inplace_after_read_kernel, 0.25),
+    ):
+        out = wp.zeros((num_blocks, RACE_TILE, RACE_TILE), dtype=float, device=device)
+        wp.launch_tiled(kernel, dim=num_blocks, inputs=[A, y, work], outputs=[out], block_dim=64, device=device)
+
+        expected = y_np * sum(factor**k for k in range(RACE_ITERS))
+        assert_np_equal(out.numpy(), np.broadcast_to(expected, out.shape))
+
+
 class TestTileSolveNoMathDx(unittest.TestCase):
     pass
 
@@ -622,6 +693,7 @@ solve_tests = [
     ("test_cholesky_solve_matrix", test_cholesky_solve_matrix),
     ("test_cholesky_solve_inplace_vector", test_cholesky_solve_inplace_vector),
     ("test_cholesky_solve_inplace_matrix", test_cholesky_solve_inplace_matrix),
+    ("test_solve_inplace_after_read", test_solve_inplace_after_read),
     ("test_lower_solve_block_dim_1", test_lower_solve_block_dim_1),
     ("test_cholesky_solve_matrix_block_dim_1", test_cholesky_solve_matrix_block_dim_1),
 ]
