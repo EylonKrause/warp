@@ -1170,6 +1170,47 @@ def test_tile_view_runtime_slice_bound_rejected(test, device):
         wp.launch_tiled(kernel_fn, dim=[1], inputs=[4], block_dim=32, device=device)
 
 
+@wp.kernel(enable_backward=False)
+def test_tile_assign_after_read_kernel(work: wp.array[int], out: wp.array2d[float]):
+    block, lane = wp.tid()
+    c = wp.tile_full(shape=(32, 32), value=2.0, storage="shared")
+    total = float(0.0)
+
+    for it in range(8):
+        # delay the second warp before its read, adds zero to the total
+        x = float(0.0)
+        for k in range(work[lane]):
+            x = wp.sin(x + float(k))
+        total += wp.where(x > 1.0e30, 1.0, 0.0)
+
+        # every thread reads c before it is overwritten below
+        total += c[0, (lane + 17) % 32]
+
+        # register source: the write must wait for the reads above in all threads
+        wp.tile_assign(c, wp.tile_full(shape=(32, 32), value=float(it + 1)))
+
+    out[block, lane] = total
+
+
+def test_tile_assign_after_read(test, device):
+    """Verify that ``wp.tile_assign()`` from a register tile does not overwrite a shared tile still being read (GH-2316)."""
+    num_blocks = 256
+    work = np.zeros(64, dtype=np.int32)
+    work[32:] = 2000  # only the second warp does extra work before its read
+
+    out = wp.zeros((num_blocks, 64), dtype=float, device=device)
+    wp.launch(
+        test_tile_assign_after_read_kernel,
+        dim=(num_blocks, 64),
+        inputs=[wp.array(work, dtype=int, device=device), out],
+        block_dim=64,
+        device=device,
+    )
+
+    # 2 from the initial fill, then 1 through 7 from the assignments
+    assert_np_equal(out.numpy(), np.full((num_blocks, 64), 30.0, dtype=np.float32))
+
+
 devices = get_test_devices()
 
 
@@ -1231,6 +1272,12 @@ add_function_test(
     TestTileView,
     "test_tile_assign_broadcast_backward",
     test_tile_assign_broadcast_backward,
+    devices=devices,
+)
+add_function_test(
+    TestTileView,
+    "test_tile_assign_after_read",
+    test_tile_assign_after_read,
     devices=devices,
 )
 add_function_test(

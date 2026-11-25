@@ -6036,15 +6036,16 @@ inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, const tile_coord_
     // pre-assignment source values.
     auto staged = src.copy_to_register();
 
-    // ensure all reads complete before any writes to (potentially aliasing) dest
-    WP_TILE_SYNC();
-
+    // the register overload synchronizes before writing to (potentially aliasing) dest
     tile_assign(dest, staged, offset);
 }
 
 template <typename TileA, typename T, typename Layout, int N>
 inline CUDA_CALLABLE void tile_assign(TileA& dest, tile_register_t<T, Layout>& src, const tile_coord_t<N>& offset)
 {
+    // ensure all prior reads of dest complete before any thread overwrites it
+    WP_TILE_SYNC();
+
     WP_PRAGMA_UNROLL
     for (int reg = 0; reg < Layout::NumRegs; ++reg) {
         int linear = Layout::linear_from_register(reg);
